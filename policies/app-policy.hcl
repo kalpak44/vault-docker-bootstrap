@@ -1,4 +1,4 @@
-# Allow creating/reading/updating secrets in the "app" subtree (KV v2)
+# KV v2: allow an app to manage secrets only under secret/app/*
 path "secret/data/app/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }

@@ -2,11 +2,9 @@
 set -euo pipefail
 
 # -----------------------------
-# Configurable env vars
+# Base config
 # -----------------------------
 : "${VAULT_LISTEN_ADDRESS:=0.0.0.0:8200}"
-
-# External reachable addresses (your LAN IP / hostname)
 : "${VAULT_API_ADDR:=http://127.0.0.1:8200}"
 : "${VAULT_CLUSTER_ADDR:=http://127.0.0.1:8201}"
 
@@ -18,23 +16,30 @@ set -euo pipefail
 
 : "${VAULT_ENABLE_UI:=true}"
 
-# Bootstrap options
+# -----------------------------
+# Bootstrap behavior
+# -----------------------------
 : "${VAULT_ENABLE_KV:=true}"
 : "${VAULT_KV_PATH:=secret}"
 
-# Policies to write (files must exist in /opt/vault-bootstrap/policies/)
 : "${VAULT_WRITE_POLICIES:=true}"
+: "${VAULT_ADMIN_POLICY_NAME:=admin}"
 : "${VAULT_APP_POLICY_NAME:=app-policy}"
-: "${VAULT_UI_POLICY_NAME:=ui-readonly}"
 
-# AppRole for Kubernetes (enable by default to match your workflow)
-: "${VAULT_ENABLE_APPROLE:=true}"
-: "${VAULT_APPROLE_NAME:=k8s-reader}"
-: "${VAULT_APPROLE_POLICIES:=app-policy,ui-readonly}"
+# Human-friendly UI login (recommended for your use)
+: "${VAULT_ENABLE_USERPASS:=true}"
+: "${VAULT_UI_ADMIN_USERNAME:=admin}"
+: "${VAULT_UI_ADMIN_PASSWORD:=change-me-now}"   # IMPORTANT: override in compose/env
+: "${VAULT_UI_ADMIN_POLICIES:=admin}"
+
+# Optional: AppRole for Kubernetes later (off by default here)
+: "${VAULT_ENABLE_APPROLE:=false}"
+: "${VAULT_APPROLE_NAME:=k8s-app}"
+: "${VAULT_APPROLE_POLICIES:=app-policy}"
 
 # -----------------------------
 # Important: force Vault CLI to use HTTP (tls_disable=1)
-# Prevents: "HTTP response to HTTPS client"
+# prevents "HTTP response to HTTPS client"
 # -----------------------------
 export VAULT_ADDR="${VAULT_API_ADDR}"
 
@@ -96,7 +101,7 @@ fi
 if [[ -f "${VAULT_INIT_FILE}" ]]; then
   export VAULT_TOKEN
   VAULT_TOKEN="$(jq -r '.root_token' "${VAULT_INIT_FILE}")"
-  echo "[bootstrap] Logging in with root token..."
+  echo "[bootstrap] Logging in with root token (bootstrap only)..."
   VAULT_ADDR="${VAULT_API_ADDR}" vault login -no-print "${VAULT_TOKEN}" >/dev/null || true
 else
   echo "[bootstrap] WARNING: No init file -> skipping bootstrap actions."
@@ -104,6 +109,7 @@ fi
 
 # -------- Bootstrap config --------
 if [[ -n "${VAULT_TOKEN:-}" ]]; then
+
   # Enable KV v2
   if [[ "${VAULT_ENABLE_KV}" == "true" ]]; then
     kv_mount="${VAULT_KV_PATH}/"
@@ -115,17 +121,36 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
     fi
   fi
 
-  # Write policies (app + ui)
+  # Write policies
   if [[ "${VAULT_WRITE_POLICIES}" == "true" ]]; then
     echo "[bootstrap] Writing policies..."
+    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_ADMIN_POLICY_NAME}" \
+      "/opt/vault-bootstrap/policies/${VAULT_ADMIN_POLICY_NAME}.hcl" >/dev/null
+
     VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_APP_POLICY_NAME}" \
       "/opt/vault-bootstrap/policies/${VAULT_APP_POLICY_NAME}.hcl" >/dev/null
-
-    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_UI_POLICY_NAME}" \
-      "/opt/vault-bootstrap/policies/${VAULT_UI_POLICY_NAME}.hcl" >/dev/null
   fi
 
-  # Enable AppRole for Kubernetes-style auth
+  # Enable userpass + create admin user for UI (idempotent-ish)
+  if [[ "${VAULT_ENABLE_USERPASS}" == "true" ]]; then
+    if ! VAULT_ADDR="${VAULT_API_ADDR}" vault auth list -format=json | jq -e '."userpass/"' >/dev/null 2>&1; then
+      echo "[bootstrap] Enabling userpass auth..."
+      VAULT_ADDR="${VAULT_API_ADDR}" vault auth enable userpass >/dev/null
+    else
+      echo "[bootstrap] userpass already enabled."
+    fi
+
+    if [[ "${VAULT_UI_ADMIN_PASSWORD}" == "change-me-now" ]]; then
+      echo "[bootstrap] WARNING: VAULT_UI_ADMIN_PASSWORD is still default. Override it in compose/env."
+    fi
+
+    echo "[bootstrap] Creating/updating UI admin user: ${VAULT_UI_ADMIN_USERNAME}"
+    VAULT_ADDR="${VAULT_API_ADDR}" vault write "auth/userpass/users/${VAULT_UI_ADMIN_USERNAME}" \
+      password="${VAULT_UI_ADMIN_PASSWORD}" \
+      policies="${VAULT_UI_ADMIN_POLICIES}" >/dev/null
+  fi
+
+  # Optional: AppRole for Kubernetes later
   if [[ "${VAULT_ENABLE_APPROLE}" == "true" ]]; then
     if ! VAULT_ADDR="${VAULT_API_ADDR}" vault auth list -format=json | jq -e '."approle/"' >/dev/null 2>&1; then
       echo "[bootstrap] Enabling AppRole auth..."
@@ -146,7 +171,7 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
     echo "${secret_id}" > /vault/file/approle_secret_id.txt
     chmod 600 /vault/file/approle_role_id.txt /vault/file/approle_secret_id.txt
 
-    echo "[bootstrap] AppRole creds written to /vault/file/approle_role_id.txt and /vault/file/approle_secret_id.txt"
+    echo "[bootstrap] AppRole creds written to /vault/file/"
   fi
 
   echo "[bootstrap] Completed."

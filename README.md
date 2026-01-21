@@ -1,35 +1,38 @@
 # Vault Docker Bootstrap
 
-A clean, production-style Docker image for **HashiCorp Vault** that can automatically:
+A practical bootstrap image for HashiCorp Vault (private networks / homelab) that:
 
-✅ Start Vault server  
-✅ Initialize Vault (first run)  
-✅ Unseal Vault (on restarts)  
-✅ Enable KV v2 (optional)  
-✅ Writes policies:
-- `app-policy` (manage secrets at `secret/app/*`)
-- `ui-readonly` (prevents Vault UI "Resultant ACL check failed" warning)
+- Starts Vault (HTTP, tls_disable=1)
+- Initializes & unseals automatically (persisting init.json)
+- Enables KV v2 at `secret/`
+- Installs an `admin` policy (full access)
+- Enables `userpass` auth and creates an admin user for the UI
 
-✅ Enable AppRole + generate credentials (optional)  
-
-> ⚠️ This image is intended for homelabs, internal environments and quick bootstrap.  
-> It stores init data (unseal key + root token) inside a persistent mounted folder.
-> For production, use TLS + auto-unseal (KMS/Transit).
+> This is intended for private networks. For production: TLS + auto-unseal + no root token stored on disk.
 
 ---
 
-## Features
+## Login to UI (recommended)
 
-- **Idempotent bootstrap**: safe to restart
-- **No manual shell steps**
-- Everything stored inside mounted folders:
-  - Vault data → `/vault/data`
-  - Init output → `/vault/file/init.json`
-  - Optional AppRole creds → `/vault/file/approle_*.txt`
+Use **userpass**:
+- Username: `VAULT_UI_ADMIN_USERNAME` (default: admin)
+- Password: `VAULT_UI_ADMIN_PASSWORD` (you must set it)
+
+UI:
+- http://<your-ip>:8200
 
 ---
 
-## Build
+## Persistent outputs
 
-```bash
-docker build -t vault-docker-bootstrap:1.21.2 .
+- `/vault/file/init.json` (root token + unseal keys)
+
+Treat `/vault/file` as sensitive.
+
+---
+
+## Docker Hub publishing
+
+This repo publishes:
+- `kalpak44/vault-docker-bootstrap:latest`
+- `kalpak44/vault-docker-bootstrap:<shortsha>`
