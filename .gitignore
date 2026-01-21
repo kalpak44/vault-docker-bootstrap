@@ -1,0 +1,6 @@
+# local vault init files (if you ever run with bind mounts during tests)
+init.json
+*.log
+
+# env files
+.env

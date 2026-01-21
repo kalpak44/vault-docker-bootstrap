@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  vault:
+    build: ..
+    container_name: vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+      - "8201:8201"
+    env_file:
+      - ../.env.example
+    volumes:
+      - /home/kalpak44/vault/data:/vault/data
+      - /home/kalpak44/vault/file:/vault/file
