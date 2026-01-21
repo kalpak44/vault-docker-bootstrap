@@ -54,7 +54,7 @@ die()  { err "$*"; exit 1; }
 # KV + policy loading
 # -----------------------------
 : "${VAULT_ENABLE_KV:=true}"
-: "${VAULT_KV_PATH:=kv}"  # use kv to match your ESO config
+: "${VAULT_KV_PATH:=kv}"  # Use kv to match your ESO config (ClusterSecretStore path: kv)
 
 : "${VAULT_WRITE_POLICIES:=true}"
 : "${VAULT_POLICIES_DIR:=/opt/vault-bootstrap/policies}"
@@ -76,7 +76,7 @@ die()  { err "$*"; exit 1; }
 : "${VAULT_K8S_AUTH_PATH:=kubernetes}"
 
 # You MUST provide these for external clusters:
-# - K8S_HOST: Kubernetes API server URL (e.g. https://10.152.183.1:443)
+# - K8S_HOST: Kubernetes API server URL (e.g. https://192.168.1.50:16443)
 # - K8S_CACERT_FILE: CA cert file path
 # - K8S_TOKENREVIEW_JWT_FILE: token reviewer JWT file path
 : "${K8S_HOST:=}"
@@ -152,10 +152,6 @@ vault_is_sealed() {
   curl -s "${VAULT_API_ADDR}/v1/sys/seal-status" | jq -r '.sealed' | grep -q '^true$'
 }
 
-require_vault_token() {
-  [[ -n "${VAULT_TOKEN:-}" ]] || die "VAULT_TOKEN is not set (login/bootstrap failed)"
-}
-
 # -----------------------------
 # Init (LAB/PoC) - idempotent
 # -----------------------------
@@ -172,7 +168,7 @@ if [[ "${VAULT_BOOTSTRAP_INIT_UNSEAL}" == "true" ]]; then
       chmod 600 "${VAULT_INIT_FILE}"
       log "[bootstrap] Init saved: ${VAULT_INIT_FILE}"
     else
-      warn "VAULT_PERSIST_INIT_FILE=false: init output NOT persisted. You must capture unseal key + root token externally."
+      warn "VAULT_PERSIST_INIT_FILE=false: init output NOT persisted. Capture unseal key + root token externally."
     fi
   else
     log "[bootstrap] Vault already initialized."
@@ -203,7 +199,7 @@ if [[ -f "${VAULT_INIT_FILE}" ]]; then
   log "[bootstrap] Logging in with root token (bootstrap actions only)..."
   VAULT_ADDR="${VAULT_API_ADDR}" vault login -no-print "${VAULT_TOKEN}" >/dev/null || true
 else
-  warn "No init file at ${VAULT_INIT_FILE}. Skipping login/bootstrap actions that require VAULT_TOKEN."
+  warn "No init file at ${VAULT_INIT_FILE}. Skipping login/bootstrap actions requiring VAULT_TOKEN."
 fi
 
 # -----------------------------
@@ -211,6 +207,7 @@ fi
 # -----------------------------
 if [[ "${VAULT_BOOTSTRAP_CONFIGURE}" == "true" ]]; then
   if [[ -n "${VAULT_TOKEN:-}" ]]; then
+
     # ---- Enable KV v2 ----
     if [[ "${VAULT_ENABLE_KV}" == "true" ]]; then
       kv_mount="${VAULT_KV_PATH}/"
@@ -268,10 +265,11 @@ if [[ "${VAULT_BOOTSTRAP_CONFIGURE}" == "true" ]]; then
         policies="${VAULT_UI_ADMIN_POLICIES}" >/dev/null
     fi
 
-    # ---- Enable Kubernetes auth + configure + create role (optional) ----
+    # ---- Enable Kubernetes auth + configure + create role (External Secrets Operator) ----
     if [[ "${VAULT_ENABLE_K8S_AUTH}" == "true" ]]; then
       auth_mount="${VAULT_K8S_AUTH_PATH}/"
 
+      # Enable auth method if missing
       if ! vault_json auth list | jq -e --arg m "${auth_mount}" '.[$m]' >/dev/null 2>&1; then
         log "[bootstrap] Enabling Kubernetes auth at ${auth_mount}"
         VAULT_ADDR="${VAULT_API_ADDR}" vault auth enable -path="${VAULT_K8S_AUTH_PATH}" kubernetes >/dev/null
@@ -279,14 +277,22 @@ if [[ "${VAULT_BOOTSTRAP_CONFIGURE}" == "true" ]]; then
         log "[bootstrap] Kubernetes auth already enabled at ${auth_mount}"
       fi
 
+      # Validate required inputs and ALWAYS write config if present
       if [[ -z "${K8S_HOST}" ]]; then
-        warn "K8S_HOST not set -> skipping kubernetes auth config + role creation."
-      elif [[ ! -f "${K8S_CACERT_FILE}" ]]; then
-        warn "Missing ${K8S_CACERT_FILE} -> skipping kubernetes auth config + role creation."
-      elif [[ ! -f "${K8S_TOKENREVIEW_JWT_FILE}" ]]; then
-        warn "Missing ${K8S_TOKENREVIEW_JWT_FILE} -> skipping kubernetes auth config + role creation."
+        warn "K8S_HOST not set (expected e.g. https://192.168.1.50:16443) -> skipping k8s auth config + role creation."
+      elif [[ ! "${K8S_HOST}" =~ ^https?:// ]]; then
+        warn "K8S_HOST must include scheme (https://...). Got: ${K8S_HOST} -> skipping."
+      elif [[ ! -f "${K8S_CACERT_FILE}" || ! -s "${K8S_CACERT_FILE}" ]]; then
+        warn "Missing/empty CA cert at ${K8S_CACERT_FILE} -> skipping."
+      elif [[ ! -f "${K8S_TOKENREVIEW_JWT_FILE}" || ! -s "${K8S_TOKENREVIEW_JWT_FILE}" ]]; then
+        warn "Missing/empty token reviewer JWT at ${K8S_TOKENREVIEW_JWT_FILE} -> skipping."
       else
-        log "[bootstrap] Configuring Kubernetes auth (TokenReview)..."
+        log "[bootstrap] Writing Kubernetes auth config (TokenReview)..."
+        log "[bootstrap] - kubernetes_host=${K8S_HOST}"
+        log "[bootstrap] - kubernetes_ca_cert=@${K8S_CACERT_FILE}"
+        log "[bootstrap] - token_reviewer_jwt=@${K8S_TOKENREVIEW_JWT_FILE}"
+
+        # IMPORTANT: ALWAYS re-write config to avoid stale/bad values (like kubernetes_host=Vault host)
         VAULT_ADDR="${VAULT_API_ADDR}" vault write "auth/${VAULT_K8S_AUTH_PATH}/config" \
           kubernetes_host="${K8S_HOST}" \
           kubernetes_ca_cert=@"${K8S_CACERT_FILE}" \
@@ -298,12 +304,13 @@ if [[ "${VAULT_BOOTSTRAP_CONFIGURE}" == "true" ]]; then
           bound_service_account_namespaces="${VAULT_K8S_BOUND_SA_NAMESPACES}" \
           policies="${VAULT_K8S_ROLE_POLICIES}" \
           ttl="${VAULT_K8S_ROLE_TTL}" >/dev/null
+
+        log "[bootstrap] Kubernetes auth configured successfully."
       fi
     fi
 
     # ---- Seed a PoC secret (optional) ----
     if [[ "${VAULT_SEED_SECRETS}" == "true" ]]; then
-      # This uses kv-v2 "vault kv put" semantics (path like kv/poc)
       log "[bootstrap] Seeding PoC secret at ${VAULT_SEED_POC_SECRET_PATH}..."
       VAULT_ADDR="${VAULT_API_ADDR}" vault kv put "${VAULT_SEED_POC_SECRET_PATH}" \
         message="${VAULT_SEED_POC_SECRET_MESSAGE}" >/dev/null
