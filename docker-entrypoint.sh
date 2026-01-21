@@ -5,7 +5,6 @@ set -euo pipefail
 # Configurable env vars
 # -----------------------------
 : "${VAULT_LISTEN_ADDRESS:=0.0.0.0:8200}"
-: "${VAULT_CLUSTER_LISTEN_ADDRESS:=0.0.0.0:8201}"
 
 # External reachable addresses (your LAN IP / hostname)
 : "${VAULT_API_ADDR:=http://127.0.0.1:8200}"
@@ -23,24 +22,25 @@ set -euo pipefail
 : "${VAULT_ENABLE_KV:=true}"
 : "${VAULT_KV_PATH:=secret}"
 
-: "${VAULT_WRITE_DEFAULT_POLICY:=true}"
-: "${VAULT_DEFAULT_POLICY_NAME:=app-policy}"
+# Policies to write (files must exist in /opt/vault-bootstrap/policies/)
+: "${VAULT_WRITE_POLICIES:=true}"
+: "${VAULT_APP_POLICY_NAME:=app-policy}"
+: "${VAULT_UI_POLICY_NAME:=ui-readonly}"
 
-: "${VAULT_ENABLE_APPROLE:=false}"
-: "${VAULT_APPROLE_NAME:=app}"
-: "${VAULT_APPROLE_POLICY:=app-policy}"
+# AppRole for Kubernetes (enable by default to match your workflow)
+: "${VAULT_ENABLE_APPROLE:=true}"
+: "${VAULT_APPROLE_NAME:=k8s-reader}"
+: "${VAULT_APPROLE_POLICIES:=app-policy,ui-readonly}"
 
 # -----------------------------
 # Important: force Vault CLI to use HTTP (tls_disable=1)
-# This prevents: "HTTP response to HTTPS client"
+# Prevents: "HTTP response to HTTPS client"
 # -----------------------------
 export VAULT_ADDR="${VAULT_API_ADDR}"
 
 mkdir -p /vault/config /vault/data /vault/file
 
 echo "[entrypoint] Rendering vault.hcl..."
-
-# Render template -> actual config file
 sed \
   -e "s|{{VAULT_ENABLE_UI}}|${VAULT_ENABLE_UI}|g" \
   -e "s|{{VAULT_FILE_STORAGE_PATH}}|${VAULT_FILE_STORAGE_PATH}|g" \
@@ -67,13 +67,11 @@ done
 
 # -------- Init (idempotent) --------
 initialized="$(curl -s "${VAULT_API_ADDR}/v1/sys/init" | jq -r '.initialized')"
-
 if [[ "${initialized}" != "true" ]]; then
   echo "[bootstrap] Vault not initialized -> initializing..."
   VAULT_ADDR="${VAULT_API_ADDR}" vault operator init -format=json \
     -key-shares="${VAULT_KEY_SHARES}" \
     -key-threshold="${VAULT_KEY_THRESHOLD}" | tee "${VAULT_INIT_FILE}" >/dev/null
-
   chmod 600 "${VAULT_INIT_FILE}"
   echo "[bootstrap] Init saved: ${VAULT_INIT_FILE}"
 else
@@ -82,7 +80,6 @@ fi
 
 # -------- Unseal (idempotent) --------
 sealed="$(curl -s "${VAULT_API_ADDR}/v1/sys/seal-status" | jq -r '.sealed')"
-
 if [[ "${sealed}" == "true" ]]; then
   if [[ -f "${VAULT_INIT_FILE}" ]]; then
     unseal_key="$(jq -r '.unseal_keys_b64[0]' "${VAULT_INIT_FILE}")"
@@ -95,11 +92,10 @@ else
   echo "[bootstrap] Vault already unsealed."
 fi
 
-# -------- Login --------
+# -------- Login (needs init file) --------
 if [[ -f "${VAULT_INIT_FILE}" ]]; then
   export VAULT_TOKEN
   VAULT_TOKEN="$(jq -r '.root_token' "${VAULT_INIT_FILE}")"
-
   echo "[bootstrap] Logging in with root token..."
   VAULT_ADDR="${VAULT_API_ADDR}" vault login -no-print "${VAULT_TOKEN}" >/dev/null || true
 else
@@ -108,8 +104,7 @@ fi
 
 # -------- Bootstrap config --------
 if [[ -n "${VAULT_TOKEN:-}" ]]; then
-
-  # Enable KV v2 at secret/
+  # Enable KV v2
   if [[ "${VAULT_ENABLE_KV}" == "true" ]]; then
     kv_mount="${VAULT_KV_PATH}/"
     if ! VAULT_ADDR="${VAULT_API_ADDR}" vault secrets list -format=json | jq -e --arg m "${kv_mount}" '.[$m]' >/dev/null 2>&1; then
@@ -120,14 +115,17 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
     fi
   fi
 
-  # Write default policy
-  if [[ "${VAULT_WRITE_DEFAULT_POLICY}" == "true" ]]; then
-    echo "[bootstrap] Writing policy ${VAULT_DEFAULT_POLICY_NAME}"
-    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_DEFAULT_POLICY_NAME}" \
-      "/opt/vault-bootstrap/policies/${VAULT_DEFAULT_POLICY_NAME}.hcl" >/dev/null
+  # Write policies (app + ui)
+  if [[ "${VAULT_WRITE_POLICIES}" == "true" ]]; then
+    echo "[bootstrap] Writing policies..."
+    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_APP_POLICY_NAME}" \
+      "/opt/vault-bootstrap/policies/${VAULT_APP_POLICY_NAME}.hcl" >/dev/null
+
+    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_UI_POLICY_NAME}" \
+      "/opt/vault-bootstrap/policies/${VAULT_UI_POLICY_NAME}.hcl" >/dev/null
   fi
 
-  # Enable AppRole + create role
+  # Enable AppRole for Kubernetes-style auth
   if [[ "${VAULT_ENABLE_APPROLE}" == "true" ]]; then
     if ! VAULT_ADDR="${VAULT_API_ADDR}" vault auth list -format=json | jq -e '."approle/"' >/dev/null 2>&1; then
       echo "[bootstrap] Enabling AppRole auth..."
@@ -136,10 +134,10 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
       echo "[bootstrap] AppRole already enabled."
     fi
 
-    echo "[bootstrap] Configuring AppRole ${VAULT_APPROLE_NAME}..."
+    echo "[bootstrap] Configuring AppRole ${VAULT_APPROLE_NAME} with policies: ${VAULT_APPROLE_POLICIES}"
     VAULT_ADDR="${VAULT_API_ADDR}" vault write "auth/approle/role/${VAULT_APPROLE_NAME}" \
-      token_policies="${VAULT_APPROLE_POLICY}" \
-      token_ttl="1h" token_max_ttl="4h" >/dev/null
+      token_policies="${VAULT_APPROLE_POLICIES}" \
+      token_ttl="24h" token_max_ttl="72h" >/dev/null
 
     role_id="$(VAULT_ADDR="${VAULT_API_ADDR}" vault read -field=role_id auth/approle/role/${VAULT_APPROLE_NAME}/role-id)"
     secret_id="$(VAULT_ADDR="${VAULT_API_ADDR}" vault write -field=secret_id -f auth/approle/role/${VAULT_APPROLE_NAME}/secret-id)"
@@ -148,7 +146,7 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
     echo "${secret_id}" > /vault/file/approle_secret_id.txt
     chmod 600 /vault/file/approle_role_id.txt /vault/file/approle_secret_id.txt
 
-    echo "[bootstrap] AppRole creds written into /vault/file/"
+    echo "[bootstrap] AppRole creds written to /vault/file/approle_role_id.txt and /vault/file/approle_secret_id.txt"
   fi
 
   echo "[bootstrap] Completed."

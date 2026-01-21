@@ -6,7 +6,10 @@ A clean, production-style Docker image for **HashiCorp Vault** that can automati
 ✅ Initialize Vault (first run)  
 ✅ Unseal Vault (on restarts)  
 ✅ Enable KV v2 (optional)  
-✅ Write policies (optional)  
+✅ Writes policies:
+- `app-policy` (manage secrets at `secret/app/*`)
+- `ui-readonly` (prevents Vault UI "Resultant ACL check failed" warning)
+
 ✅ Enable AppRole + generate credentials (optional)  
 
 > ⚠️ This image is intended for homelabs, internal environments and quick bootstrap.  

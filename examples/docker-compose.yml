@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   vault:
-    build: ..
+    image: kalpak44/vault-docker-bootstrap:latest
     container_name: vault
     restart: unless-stopped
     cap_add:
@@ -10,8 +10,9 @@ services:
     ports:
       - "8200:8200"
       - "8201:8201"
-    env_file:
-      - ../.env.example
+    environment:
+      VAULT_API_ADDR: "http://192.168.1.50:8200"
+      VAULT_CLUSTER_ADDR: "http://192.168.1.50:8201"
     volumes:
       - ./vault-data:/vault/data
       - ./vault-file:/vault/file

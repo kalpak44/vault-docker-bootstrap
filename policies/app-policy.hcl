@@ -1,7 +1,13 @@
-path "secret/data/app/*" {
-  capabilities = ["create", "read", "update", "delete", "list"]
+ui = {{VAULT_ENABLE_UI}}
+
+storage "file" {
+  path = "{{VAULT_FILE_STORAGE_PATH}}"
 }
 
-path "secret/metadata/app/*" {
-  capabilities = ["list", "read"]
+listener "tcp" {
+  address     = "{{VAULT_LISTEN_ADDRESS}}"
+  tls_disable = 1
 }
+
+api_addr     = "{{VAULT_API_ADDR}}"
+cluster_addr = "{{VAULT_CLUSTER_ADDR}}"
