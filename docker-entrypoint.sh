@@ -23,8 +23,14 @@ set -euo pipefail
 : "${VAULT_KV_PATH:=secret}"
 
 : "${VAULT_WRITE_POLICIES:=true}"
-: "${VAULT_ADMIN_POLICY_NAME:=admin}"
-: "${VAULT_APP_POLICY_NAME:=app-policy}"
+
+# Auto-policy loading:
+# - Default dir is the policies folder inside the image
+# - Override in docker-compose to point at a mounted folder, e.g. /vault/policies
+: "${VAULT_POLICIES_DIR:=/opt/vault-bootstrap/policies}"
+: "${VAULT_POLICIES_GLOB:=*.hcl}"
+# Set to "true" if you want to load policies recursively from subfolders
+: "${VAULT_POLICIES_RECURSIVE:=false}"
 
 # Human-friendly UI login (recommended for your use)
 : "${VAULT_ENABLE_USERPASS:=true}"
@@ -121,14 +127,34 @@ if [[ -n "${VAULT_TOKEN:-}" ]]; then
     fi
   fi
 
-  # Write policies
+  # Write policies (AUTO: all .hcl files in policies dir)
   if [[ "${VAULT_WRITE_POLICIES}" == "true" ]]; then
-    echo "[bootstrap] Writing policies..."
-    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_ADMIN_POLICY_NAME}" \
-      "/opt/vault-bootstrap/policies/${VAULT_ADMIN_POLICY_NAME}.hcl" >/dev/null
+    echo "[bootstrap] Writing policies from ${VAULT_POLICIES_DIR}..."
 
-    VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${VAULT_APP_POLICY_NAME}" \
-      "/opt/vault-bootstrap/policies/${VAULT_APP_POLICY_NAME}.hcl" >/dev/null
+    if [[ ! -d "${VAULT_POLICIES_DIR}" ]]; then
+      echo "[bootstrap] WARNING: Policies dir not found: ${VAULT_POLICIES_DIR} (skipping)"
+    else
+      if [[ "${VAULT_POLICIES_RECURSIVE}" == "true" ]]; then
+        mapfile -t policy_files < <(find "${VAULT_POLICIES_DIR}" -type f -name '*.hcl' | sort)
+      else
+        shopt -s nullglob
+        policy_files=( "${VAULT_POLICIES_DIR}"/${VAULT_POLICIES_GLOB} )
+        shopt -u nullglob
+      fi
+
+      if (( ${#policy_files[@]} == 0 )); then
+        echo "[bootstrap] WARNING: No policy files found in ${VAULT_POLICIES_DIR}"
+      else
+        for f in "${policy_files[@]}"; do
+          # Policy name = filename without .hcl
+          name="$(basename "${f}")"
+          name="${name%.hcl}"
+
+          echo "[bootstrap] - writing policy: ${name} (from ${f})"
+          VAULT_ADDR="${VAULT_API_ADDR}" vault policy write "${name}" "${f}" >/dev/null
+        done
+      fi
+    fi
   fi
 
   # Enable userpass + create admin user for UI (idempotent-ish)
