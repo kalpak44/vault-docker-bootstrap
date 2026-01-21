@@ -1,13 +1,8 @@
-ui = {{VAULT_ENABLE_UI}}
-
-storage "file" {
-  path = "{{VAULT_FILE_STORAGE_PATH}}"
+# Allow creating/reading/updating secrets in the "app" subtree (KV v2)
+path "secret/data/app/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
 }
 
-listener "tcp" {
-  address     = "{{VAULT_LISTEN_ADDRESS}}"
-  tls_disable = 1
+path "secret/metadata/app/*" {
+  capabilities = ["list", "read", "delete"]
 }
-
-api_addr     = "{{VAULT_API_ADDR}}"
-cluster_addr = "{{VAULT_CLUSTER_ADDR}}"
