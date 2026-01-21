@@ -13,5 +13,5 @@ services:
     env_file:
       - ../.env.example
     volumes:
-      - /home/kalpak44/vault/data:/vault/data
-      - /home/kalpak44/vault/file:/vault/file
+      - ./vault-data:/vault/data
+      - ./vault-file:/vault/file
